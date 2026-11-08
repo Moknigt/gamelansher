@@ -3,11 +3,17 @@ name: Build GameLauncher.exe
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -15,37 +21,63 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Finds the zip you uploaded (any .zip in the repo root) and unzips it into "_src".
       - name: Unzip the project
         shell: pwsh
         run: |
-          $zip = Get-ChildItem -Filter "GameLauncher*.zip" -File | Select-Object -First 1
-          if (-not $zip) { throw "GameLauncher.zip was not found in the repository root" }
-          Expand-Archive -Path $zip.FullName -DestinationPath "$env:RUNNER_TEMP/proj" -Force
-          $py = Get-ChildItem "$env:RUNNER_TEMP/proj" -Recurse -Filter GameLauncher.pyw | Select-Object -First 1
-          if (-not $py) { throw "GameLauncher.pyw was not inside the zip" }
-          "PROJ=$($py.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $zip = Get-ChildItem -Path . -Filter *.zip -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $zip) { throw "No .zip file found in the repo root. Upload the project zip next to the .github folder." }
+          Write-Host "Using zip: $($zip.Name)"
+          Expand-Archive -Path $zip.FullName -DestinationPath _src -Force
+          $main = Get-ChildItem -Path _src -Recurse -Filter main.py | Where-Object { Test-Path (Join-Path $_.DirectoryName "gl") } | Select-Object -First 1
+          if (-not $main) { throw "main.py (with the gl folder) was not found inside the zip" }
+          Write-Host "Project folder: $($main.DirectoryName)"
+          "PROJ=$($main.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install requirements
+        working-directory: ${{ env.PROJ }}
+        run: python -m pip install --upgrade pip "pyinstaller>=6.9" -r requirements.txt
 
       - name: Check the code compiles
         working-directory: ${{ env.PROJ }}
-        run: python -m py_compile GameLauncher.pyw
+        run: python -m compileall -q gl main.py
 
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pip "pyinstaller>=6.9"
-
-      - name: Build the exe
+      - name: Check the icon exists
         working-directory: ${{ env.PROJ }}
-        run: pyinstaller --clean --onefile --noconsole --icon icon.ico --add-data "icon.ico;." --name GameLauncher GameLauncher.pyw
-
-      - name: Collect the exe
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item "$env:PROJ\dist\GameLauncher.exe" "out\GameLauncher.exe"
-          if (!(Test-Path "out\GameLauncher.exe")) { throw "GameLauncher.exe was not built" }
-          Get-Item "out\GameLauncher.exe" | Select-Object Name, Length
+          if (!(Test-Path icon.ico)) { throw "icon.ico is missing inside the zip" }
+
+      # Opens every screen with demo games (no window, no internet) and fails the build on any error.
+      - name: Smoke test (all screens, headless)
+        working-directory: ${{ env.PROJ }}
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tests/smoke.py
+
+      # One single exe, no console window. The icon is embedded and also shipped inside for the window.
+      - name: Build the exe
+        working-directory: ${{ env.PROJ }}
+        run: >
+          pyinstaller --clean --onefile --noconsole --icon icon.ico --add-data "icon.ico;."
+          --exclude-module tkinter --name GameLauncher main.py
+
+      - name: Make sure the exe exists
+        working-directory: ${{ env.PROJ }}
+        shell: pwsh
+        run: |
+          if (!(Test-Path dist/GameLauncher.exe)) { throw "GameLauncher.exe was not built" }
+          Get-Item dist/GameLauncher.exe | Select-Object Name, Length
 
       - name: Upload the exe
         uses: actions/upload-artifact@v4
         with:
           name: GameLauncher-exe
-          path: out/GameLauncher.exe
+          path: ${{ env.PROJ }}/dist/GameLauncher.exe
+
+      - name: Attach the exe to a release (only when you push a tag like v1.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PROJ }}/dist/GameLauncher.exe
