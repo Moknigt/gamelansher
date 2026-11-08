@@ -1,0 +1,51 @@
+name: Build GameLauncher.exe
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Unzip the project
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Filter "GameLauncher*.zip" -File | Select-Object -First 1
+          if (-not $zip) { throw "GameLauncher.zip was not found in the repository root" }
+          Expand-Archive -Path $zip.FullName -DestinationPath "$env:RUNNER_TEMP/proj" -Force
+          $py = Get-ChildItem "$env:RUNNER_TEMP/proj" -Recurse -Filter GameLauncher.pyw | Select-Object -First 1
+          if (-not $py) { throw "GameLauncher.pyw was not inside the zip" }
+          "PROJ=$($py.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Check the code compiles
+        working-directory: ${{ env.PROJ }}
+        run: python -m py_compile GameLauncher.pyw
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip "pyinstaller>=6.9"
+
+      - name: Build the exe
+        working-directory: ${{ env.PROJ }}
+        run: pyinstaller --clean --onefile --noconsole --icon icon.ico --add-data "icon.ico;." --name GameLauncher GameLauncher.pyw
+
+      - name: Collect the exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "$env:PROJ\dist\GameLauncher.exe" "out\GameLauncher.exe"
+          if (!(Test-Path "out\GameLauncher.exe")) { throw "GameLauncher.exe was not built" }
+          Get-Item "out\GameLauncher.exe" | Select-Object Name, Length
+
+      - name: Upload the exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameLauncher-exe
+          path: out/GameLauncher.exe
